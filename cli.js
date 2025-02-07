@@ -149,9 +149,11 @@ async function getExpiryTimestamp() {
     );
   }
 
-  const currentTime = Date.now();
-  console.log("Current unix time: ", currentTime) // Current Unix time in seconds
-  const expiryTimestamp = currentTime + minutes * 60 * 1000; // Add the minutes converted to millisecs
+  console.log("Getting onchain time...");
+  const slot = await connection.getSlot();
+  const timestamp = await connection.getBlockTime(slot);
+  console.log("Onchain unix time stamp is: ", timestamp);
+  const expiryTimestamp = timestamp + minutes * 60; // Add the minutes converted to millisecs
 
   console.log(
     `Expiry timestamp set to: ${expiryTimestamp} (current time + ${minutes} minutes)`
@@ -197,7 +199,7 @@ async function initializeMarket(strike, asset) {
   const accountExists = await checkIfAccountExists(connection, marketPda);
   if (accountExists) {
     console.log("Market PDA already exists. Skipping initialization.");
-    console.log("Market PDA: {}", marketPda);
+    console.log("\nMarket PDA: ", marketPda);
     return marketPda;
   }
 
@@ -237,7 +239,7 @@ async function initializeMarket(strike, asset) {
     `Market initialized successfully with asset ${asset}. Transaction signature:`,
     signature
   );
-  console.log("Market PDA: {}", marketPda.toString());
+  console.log("Market PDA: ", marketPda.toString());
   return marketPda;
 }
 
@@ -264,10 +266,10 @@ async function isAccountInitialized(connection, mintPda) {
     const accountInfo = await connection.getAccountInfo(mintPda);
 
     if (accountInfo && accountInfo.data) {
-      console.log(`✅ account ${mintPda.toBase58()} is initialized.`);
+      console.log(`✅ Account ${mintPda.toBase58()} is initialized.`);
       return true; // Mint exists
     } else {
-      console.log(`❌ acoount ${mintPda.toBase58()} does NOT exist.`);
+      console.log(`❌ Account ${mintPda.toBase58()} does NOT exist.`);
       return false; // Mint does not exist
     }
   } catch (error) {
@@ -344,37 +346,68 @@ async function lockFunds(marketPda, amount) {
   const transaction = new solanaWeb3.Transaction().add(lockFundsIx);
   await sendTransactionWithLogs(connection, transaction, [payer]);
 
-  console.log(`Locked ${amount} lamports in market vault}`);
+  console.log(`Locked ${amount * PRICE_PER_TOKEN} lamports in market vault`);
 }
 
 async function redeem(marketPda) {
-  const [marketVaultPda] = solanaWeb3.PublicKey.findProgramAddressSync(
-    [Buffer.from("market_vault"), marketPda.toBuffer()],
+
+  // ✅ Derive Mint PDAs
+  const [yesMintPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [Buffer.from("yes_mint"), marketPda.toBuffer()],
     programId
   );
 
-  const instructionData = Buffer.alloc(8);
-  Buffer.from(discriminators.redeem).copy(instructionData, 0);
+  const [noMintPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [Buffer.from("no_mint"), marketPda.toBuffer()],
+    programId
+  );
 
-  const instruction = new solanaWeb3.TransactionInstruction({
-    keys: [
-      { pubkey: marketPda, isSigner: false, isWritable: true },
-      { pubkey: marketVaultPda, isSigner: false, isWritable: true },
-      { pubkey: payer.publicKey, isSigner: true, isWritable: true },
-      {
-        pubkey: solanaWeb3.SystemProgram.programId,
-        isSigner: false,
-        isWritable: false,
-      },
-    ],
-    programId,
-    data: instructionData,
-  });
+  // ✅ Derive Associated Token Accounts (Using Correct ATA Derivation)
+  const [treasuryYesTokenAccount] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [marketPda.toBuffer(), tokenProgramId.toBuffer(), yesMintPda.toBuffer()], // ✅ Matches Rust
+    associatedTokenProgramId
+  );
+  
+  const [treasuryNoTokenAccount] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [marketPda.toBuffer(), tokenProgramId.toBuffer(), noMintPda.toBuffer()], // ✅ Matches Rust
+    associatedTokenProgramId
+  );
 
-  const transaction = new solanaWeb3.Transaction().add(instruction);
+  const [userYesTokenAccount] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [payer.publicKey.toBuffer(), tokenProgramId.toBuffer(), yesMintPda.toBuffer()], // ✅ Matches Rust
+    associatedTokenProgramId
+  ); 
+
+  const [userNoTokenAccount] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [payer.publicKey.toBuffer(), tokenProgramId.toBuffer(), noMintPda.toBuffer()], // ✅ Matches Rust
+    associatedTokenProgramId
+  );
+
+    // ✅ Step 2: Initialize Treasury Token Accounts
+    const redeemIx = new solanaWeb3.TransactionInstruction({
+      keys: [
+        { pubkey: payer.publicKey, isSigner: true, isWritable: false },
+        { pubkey: marketPda, isSigner: false, isWritable: true },
+        { pubkey: yesMintPda, isSigner: false, isWritable: true },
+        { pubkey: noMintPda, isSigner: false, isWritable: true },
+        { pubkey: treasuryYesTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: treasuryNoTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: userYesTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: userNoTokenAccount, isSigner: false, isWritable: true },
+        { pubkey: solanaWeb3.SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: tokenProgramId, isSigner: false, isWritable: false },
+      ],
+      programId,
+      data: Buffer.concat([
+        Buffer.from(discriminators.redeem),
+        Buffer.alloc(0),
+      ])
+    });
+  
+  const transaction = new solanaWeb3.Transaction().add(redeemIx);
   await sendTransactionWithLogs(connection, transaction, [payer]);
 
-  console.log(`Redeemed funds from market vault: ${marketVaultPda}`);
+  console.log(`Redeemed funds from market!`);
 }
 
 async function initializeTreasury() {
@@ -644,16 +677,21 @@ async function fetchBtcPrice() {
 }
 
 async function resolveMarket(marketPda, priceAccount) {
-  const instructionData = Buffer.alloc(8);
+  
+
   // Insert instruction discriminator here
 
   const instruction = new solanaWeb3.TransactionInstruction({
     keys: [
+      { pubkey: payer.publicKey, isSigner: true, isWritable:false},
       { pubkey: marketPda, isSigner: false, isWritable: true },
       { pubkey: priceAccount, isSigner: false, isWritable: false },
     ],
     programId,
-    data: instructionData,
+    data: Buffer.concat([
+      Buffer.from(discriminators.resolveMarket),
+      Buffer.alloc(0),
+    ])
   });
 
   const transaction = new solanaWeb3.Transaction().add(instruction);
@@ -701,6 +739,7 @@ async function resolveMarket(marketPda, priceAccount) {
           const resolveMarketPda = new solanaWeb3.PublicKey(
             await prompt("Enter market PDA: ")
           );
+          console.log("Price feeds: ", price_feeds);
           const priceAccount = new solanaWeb3.PublicKey(
             await prompt("Enter Pyth price account: ")
           );

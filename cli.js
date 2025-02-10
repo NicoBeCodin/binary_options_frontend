@@ -4,9 +4,6 @@ const splToken = require("@solana/spl-token");
 const fs = require("fs");
 const readline = require("readline");
 
-
-
-
 // Wallet Setup
 const walletPath = "/home/nico/new-kpr.json";
 const secretKey = Uint8Array.from(
@@ -37,20 +34,6 @@ const solUsdPriceFeedAccount = new solanaWeb3.PublicKey(
   "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"
 
 );
-
-const treasuryPdaHardCoded = new solanaWeb3.PublicKey("8s7phLES1aDmcNXdbcbBYwHpf1ToZHevVoAh78U63Atd");
-
-const FEED_ID =
-  "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d";
-
-// Derive Price Update PDA
-async function getPriceUpdatePda() {
-  const [pda, bump] = solanaWeb3.PublicKey.findProgramAddressSync(
-    [Buffer.from("price_update"), Buffer.from(FEED_ID, "hex")],
-    programId
-  );
-  return pda;
-}
 
 const associatedTokenProgramId = new solanaWeb3.PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const tokenProgramId = new solanaWeb3.PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
@@ -97,6 +80,27 @@ const discriminators = {
     144,
     209
   ],
+  createMint: [
+    69,
+    44,
+    215,
+    132,
+    253,
+    214,
+    41,
+    45
+  ],
+  mintMetadataTokens :[
+    117,
+    160,
+    226,
+    215,
+    175,
+    109,
+    84,
+    91
+  ]
+
 
 };
 
@@ -259,8 +263,6 @@ const price_feeds = {
   },
 };
 
-
-
 async function isAccountInitialized(connection, mintPda) {
   try {
     const accountInfo = await connection.getAccountInfo(mintPda);
@@ -277,7 +279,6 @@ async function isAccountInitialized(connection, mintPda) {
     return false;
   }
 }
-
 
 async function lockFunds(marketPda, amount) {
   const PRICE_PER_TOKEN = 100000;
@@ -437,6 +438,129 @@ async function initializeTreasury() {
   await sendTransactionWithLogs(connection, transaction, [payer]);
 
   console.log(`Treasury initialized at: ${treasuryPda}`);
+}
+
+const METADATA_SEED = "metadata";
+const TOKEN_METADATA_PROGRAM_ID = new solanaWeb3.PublicKey(
+  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+);
+
+
+async function createMetadataTokens(marketPda){
+
+  const authorityKeypair = payer;
+
+  // ✅ Derive Mint PDAs
+  const [yesMintPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [Buffer.from("yes_mint"), marketPda.toBuffer()],
+    programId
+  );
+
+  const [noMintPda] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [Buffer.from("no_mint"), marketPda.toBuffer()],
+    programId
+  );
+
+  const [yesMetadataAddress] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [
+      Buffer.from(METADATA_SEED),
+      TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+      yesMintPda.toBuffer(),
+    ],
+    TOKEN_METADATA_PROGRAM_ID
+  );
+
+  const [noMetadataAddress] = solanaWeb3.PublicKey.findProgramAddressSync(
+    [
+      Buffer.from(METADATA_SEED),
+      TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+      noMintPda.toBuffer(),
+    ],
+    TOKEN_METADATA_PROGRAM_ID
+  );
+
+    // ✅ Derive Associated Token Accounts (Using Correct ATA Derivation)
+    const [treasuryYesTokenAccount] = solanaWeb3.PublicKey.findProgramAddressSync(
+      [marketPda.toBuffer(), tokenProgramId.toBuffer(), yesMintPda.toBuffer()], // ✅ Matches Rust
+      associatedTokenProgramId
+    );
+
+
+    // ✅ Derive Associated Token Accounts (Using Correct ATA Derivation)
+    const [treasuryNoTokenAccount] = solanaWeb3.PublicKey.findProgramAddressSync(
+      [marketPda.toBuffer(), tokenProgramId.toBuffer(), noMintPda.toBuffer()], // ✅ Matches Rust
+      associatedTokenProgramId
+    );
+
+    console.log("yesMintPda: ", yesMintPda.toString());
+    console.log("metadata address", yesMetadataAddress.toString());
+    console.log("TOKEN_METADATA_PROGRAM_ID", TOKEN_METADATA_PROGRAM_ID.toString());
+    console.log("treasuryYesTokenAccount", treasuryYesTokenAccount.toString());
+    console.log("marketPda", marketPda.toString());
+
+    const checkMintAlreadyCreated = await isAccountInitialized(connection, yesMetadataAddress)
+    if (checkMintAlreadyCreated){
+      console.log("Metadata account already exists");
+      
+      //Skip next step
+    } else {
+      
+          const createMintIx = new solanaWeb3.TransactionInstruction({
+          keys: [
+            { pubkey: marketPda, isSigner: false, isWritable: true },
+            { pubkey: authorityKeypair.publicKey, isSigner: true, isWritable: false },
+            { pubkey: yesMintPda, isSigner: false, isWritable: true },
+            { pubkey: noMintPda, isSigner: false, isWritable: true },
+            
+            {pubkey: yesMetadataAddress, isSigner: false, isWritable: true},
+            {pubkey: noMetadataAddress, isSigner: false, isWritable: true},
+            {pubkey: tokenProgramId, isSigner: false, isWritable: false},
+            {pubkey: TOKEN_METADATA_PROGRAM_ID, isSigner: false, isWritable: false},
+      
+            { pubkey: solanaWeb3.SystemProgram.programId, isSigner: false, isWritable: false },
+            {pubkey: solanaWeb3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false},
+          ],
+          programId,
+          data: Buffer.concat([
+            Buffer.from(discriminators.createMint),
+            Buffer.alloc(0),
+          ]), // Replace with new discriminator
+        });
+      
+      
+        const transaction1 = new solanaWeb3.Transaction().add(createMintIx);
+        await sendTransactionWithLogs(connection, transaction1, [authorityKeypair]);
+        console.log("transaction for createMint sent");
+
+
+    }
+
+
+
+  const mintMetadataTokensIx = new solanaWeb3.TransactionInstruction({
+    keys: [
+      { pubkey: marketPda, isSigner: false, isWritable: true },
+      { pubkey: yesMintPda, isSigner: false, isWritable: true },
+      { pubkey: noMintPda, isSigner: false, isWritable: true },
+      {pubkey: treasuryYesTokenAccount, isSigner: false, isWritable: true},
+      {pubkey: treasuryNoTokenAccount, isSigner: false, isWritable: true},
+      {pubkey: authorityKeypair.publicKey, isSigner: true, isWritable: false },
+      {pubkey: solanaWeb3.SystemProgram.programId, isSigner: false, isWritable: false },
+      {pubkey: tokenProgramId, isSigner: false, isWritable: false},
+      {pubkey: associatedTokenProgramId, isSigner: false, isWritable: false},
+      {pubkey: solanaWeb3.SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false},
+    ],
+    programId,
+    data: Buffer.concat([
+      Buffer.from(discriminators.mintMetadataTokens),
+      Buffer.alloc(0),
+    ]),
+  });
+  const transaction2 = new solanaWeb3.Transaction().add(mintMetadataTokensIx);
+  await sendTransactionWithLogs(connection, transaction2, [authorityKeypair]);
+  console.log("transaction for mintMetadataTokens sent");
+  
+
 }
 
 
@@ -705,7 +829,7 @@ async function resolveMarket(marketPda, priceAccount) {
 (async () => {
   while (true) {
     const action = await prompt(
-      "Choose an action: initialize,initialize-treasury, resolve, lock, redeem, create-tokens, fetch-prices (WIP), fetch-coin, fetch-btc, exit: "
+      "Choose an action: initialize,initialize-treasury, resolve, lock, redeem, create-tokens, create-metadata, fetch-prices (WIP), fetch-coin, fetch-btc, exit: "
     );
 
     try {
@@ -757,7 +881,12 @@ async function resolveMarket(marketPda, priceAccount) {
           );
           await createOutcomeTokens(tokenMarketPda);
           break;
-
+        case "create-metadata":
+          const mintMarketPda = new solanaWeb3.PublicKey(
+            await prompt("Enter market PDA: ")
+          );
+          await createMetadataTokens(mintMarketPda);
+          break;
         case "initialize-treasury":
           await initializeTreasury();
           break;
